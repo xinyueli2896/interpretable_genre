@@ -147,3 +147,4 @@ Notes:
 - Workflow: encode each measure into a latent vector, project to a small concept space, aggregate concepts, then apply a linear classifier.
 - Per-measure contributions are directly interpretable because measure-level concept scores sum to the final evidence.
 - For best results, supply MIDI files with time signature metadata; otherwise a 4/4 default is used.
+- Best checkpoint so far: https://drive.google.com/file/d/1cv3SaMUsSlg9jBho48HUbGvBx_MO54cM/view?usp=sharing
