@@ -96,6 +96,18 @@ python scripts/eval_accuracy.py \
   --max_polyphony 8
 ```
 
+## Visualize concept space (GIF)
+
+After computing centroids, you can render a 3D GIF of concept vectors over checkpoints:
+
+```bash
+python scripts/plot_concept_gif.py \
+  --centroid_dirs artifacts/centroids/step_500_val_2.4368 artifacts/centroids/step_1000_val_2.3418 artifacts/centroids/step_1500_val_2.2593 \
+  --out_path artifacts/concept_scatter.gif \
+  --drop_dim 3 \
+  --top_genres 3
+```
+
 ## Infer + reconstruction (VAE + soft concept bottleneck)
 
 ```bash
