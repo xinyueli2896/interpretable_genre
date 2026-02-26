@@ -16,6 +16,7 @@ SRC_DIR = os.path.join(REPO_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
+from interpretable_genre.midi_roll import PROGRAM_VOCAB
 from interpretable_genre.torch_data import load_metadata_csv, load_tokenized_manifest
 from interpretable_genre.torch_model import VAEConceptModel
 from interpretable_genre.utils import load_label_map
@@ -31,29 +32,7 @@ def _aggregate_concepts(concepts: torch.Tensor, mask: torch.Tensor) -> torch.Ten
 def _load_rolls(path: str, tokenized_manifest: Dict[str, str]) -> np.ndarray:
     if path not in tokenized_manifest:
         raise ValueError(f"missing tokenized entry for {path}")
-    return np.load(tokenized_manifest[path])["rolls"]
-
-def _normalize_rolls(rolls: np.ndarray, config: dict) -> np.ndarray:
-    if not config.get("track_aware", False):
-        return rolls
-    max_tracks = int(config.get("max_tracks", 1))
-    steps_per_measure = int(config.get("steps_per_measure", rolls.shape[2]))
-    if rolls.ndim != 4:
-        raise ValueError("expected track-aware rolls with shape (measures, tracks, steps, 128)")
-    measures, tracks, steps, pitches = rolls.shape
-    if pitches != 128:
-        raise ValueError("expected 128 pitch bins")
-    if tracks < max_tracks:
-        pad = max_tracks - tracks
-        rolls = np.pad(rolls, ((0, 0), (0, pad), (0, 0), (0, 0)), mode="constant")
-    elif tracks > max_tracks:
-        rolls = rolls[:, :max_tracks]
-    if steps < steps_per_measure:
-        pad = steps_per_measure - steps
-        rolls = np.pad(rolls, ((0, 0), (0, 0), (0, pad), (0, 0)), mode="constant")
-    elif steps > steps_per_measure:
-        rolls = rolls[:, :, :steps_per_measure, :]
-    return rolls
+    return np.load(tokenized_manifest[path])["tokens"]
 
 
 
@@ -83,6 +62,11 @@ def main() -> None:
         num_concepts=config["num_concepts"],
         num_genres=config["num_genres"],
         hidden_dim=config["hidden_dim"],
+        steps_per_measure=config["steps_per_measure"],
+        max_polyphony=config.get("max_polyphony"),
+        program_vocab=config.get("program_vocab", PROGRAM_VOCAB),
+        pitchdur_vocab=config.get("pitchdur_vocab", 3074),
+        token_embed_dim=config.get("token_embed_dim", 32),
     )
     model.load_state_dict(ckpt["model_state"])
     model.eval()
@@ -105,10 +89,9 @@ def main() -> None:
             continue
         try:
             roll_stack = _load_rolls(path, tokenized_manifest)
-            roll_stack = _normalize_rolls(roll_stack, config)
         except Exception:
             continue
-        rolls_tensor = torch.tensor(roll_stack, dtype=torch.float32).unsqueeze(0)
+        rolls_tensor = torch.tensor(roll_stack, dtype=torch.long).unsqueeze(0)
         mask = torch.ones((1, roll_stack.shape[0]), dtype=torch.float32)
         with torch.no_grad():
             output = model(rolls_tensor, mask)

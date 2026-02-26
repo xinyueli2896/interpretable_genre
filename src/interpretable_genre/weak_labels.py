@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Optional
 
 import numpy as np
 
@@ -22,21 +22,66 @@ def _dataset_stats(metadata_path: str) -> Dict[str, Tuple[float, float]]:
     return _dataset_stats_from_paths(df["path"].tolist())
 
 
-def build_stats_for_paths(paths: Iterable[str]) -> Dict[str, Tuple[float, float]]:
+def _stats_for_path(path: str) -> Optional[Tuple[List[float], List[float]]]:
+    try:
+        measures, feature_names = extract_measure_features(path)
+    except Exception:
+        return None
+    if not measures:
+        return None
+    idx_density = feature_names.index("note_density")
+    idx_entropy = feature_names.index("pitch_entropy")
+    density_vals = [float(measure.vector[idx_density]) for measure in measures]
+    entropy_vals = [float(measure.vector[idx_entropy]) for measure in measures]
+    return density_vals, entropy_vals
+
+
+def build_stats_for_paths(
+    paths: Iterable[str],
+    progress: bool = False,
+    desc: str = "Stats",
+    num_workers: int = 0,
+) -> Dict[str, Tuple[float, float]]:
     density_vals: List[float] = []
     entropy_vals: List[float] = []
-    for path in paths:
+    path_list = list(paths)
+    iterator: Iterable[str] = path_list
+    if progress:
         try:
-            measures, feature_names = extract_measure_features(path)
+            from tqdm import tqdm
+
+            iterator = tqdm(path_list, desc=desc)
         except Exception:
-            continue
-        if not measures:
-            continue
-        idx_density = feature_names.index("note_density")
-        idx_entropy = feature_names.index("pitch_entropy")
-        for measure in measures:
-            density_vals.append(float(measure.vector[idx_density]))
-            entropy_vals.append(float(measure.vector[idx_entropy]))
+            iterator = path_list
+    if num_workers and num_workers > 0:
+        try:
+            import os
+            from multiprocessing import Pool
+
+            workers = num_workers if num_workers > 0 else (os.cpu_count() or 1)
+            with Pool(processes=workers) as pool:
+                for result in pool.imap_unordered(_stats_for_path, path_list):
+                    if not result:
+                        continue
+                    dens, ent = result
+                    density_vals.extend(dens)
+                    entropy_vals.extend(ent)
+        except Exception:
+            for path in iterator:
+                result = _stats_for_path(path)
+                if not result:
+                    continue
+                dens, ent = result
+                density_vals.extend(dens)
+                entropy_vals.extend(ent)
+    else:
+        for path in iterator:
+            result = _stats_for_path(path)
+            if not result:
+                continue
+            dens, ent = result
+            density_vals.extend(dens)
+            entropy_vals.extend(ent)
     if not density_vals or not entropy_vals:
         return {
             "note_density": (0.0, 1.0),

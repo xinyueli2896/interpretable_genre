@@ -37,39 +37,88 @@ midi/rock_014.mid,rock
 
 ```bash
 python scripts/build_lmd_weak_labels.py \
-  --input_dir input/dataset_name \
-  --split 0.2
+  --root /path/to/midi_folder \
+  --out_dir input/dataset_name \
+  --split 0.2 \
+  --num_workers 0
 ```
 
 Outputs:
 - `train.csv`, `test.csv` under the `--out_dir`
 - `weak_labels.jsonl` under the `--out_dir`
 
-### 2) Tokenize MIDI files (track-aware)
-To speed up the training, we precompute MIDI into tokens. 
+### 2) Tokenize MIDI files (event tokens with channel-aware programs)
+To speed up the training, we precompute MIDI into tokens. Program IDs are stored as
+`channel * 128 + program`, so you must re-tokenize after this change.
 
 ```bash
 python scripts/tokenize_midis.py \
-  --input_dir input/dataset_name \
-  --steps_per_beat 16 \
-  --steps_per_measure 64 \
-  --max_tracks 8 \
-  --max_polyphony 8
+  --root /path/to/midi_folder \
+  --out_dir input/dataset_name/tokenized_npz \
+  --manifest_out input/dataset_name/tokenized_manifest.json \
+  --steps_per_beat 4 \
+  --steps_per_measure 16 \
+  --min_aligned_ratio 0.7 \
+  --align_tolerance_steps 0.25 \
+  --max_polyphony 8 \
+  --num_workers 0
 ```
 
-### 3) Train (VAE + soft concept bottleneck, track-aware)
+`--min_aligned_ratio` filters out off-grid MIDIs by checking the fraction of note onsets
+that land within `--align_tolerance_steps` of the quantization grid.
+
+### Optional: one-shot dataset prep
+
+```bash
+TOKENIZE_ONLY=1 bash scripts/prepare_dataset.sh /path/to/midi_folder 0.2
+```
+
+This writes outputs to `input/<dataset_name>` where `<dataset_name>` is the basename of the MIDI folder.
+
+To point to an external metadata CSV:
+
+```bash
+METADATA_PATH=/path/to/metadata_genre.csv \
+  bash scripts/prepare_dataset.sh /path/to/midi_folder 0.2
+```
+
+To control the alignment filter when tokenizing:
+
+```bash
+MIN_ALIGNED_RATIO=0.7 ALIGN_TOLERANCE_STEPS=0.25 \
+  bash scripts/prepare_dataset.sh /path/to/midi_folder 0.2
+```
+
+### 3) Train (VAE + soft concept bottleneck)
 The model itself. 
 
 ```bash
 python -m interpretable_genre.train_torch_cbm \
   --input_dir input/dataset_name \
-  --model_out artifacts/vae_cbm.pt \
   --label_map_out artifacts/labels.json \
-  --track_aware \
-  --max_tracks 8 \
   --max_polyphony 8 \
-  --steps_per_beat 16 \
-  --steps_per_measure 64
+  --steps_per_beat 4 \
+  --steps_per_measure 16
+```
+
+To debug reconstruction, you can overfit on a single song:
+
+```bash
+python -m interpretable_genre.train_torch_cbm \
+  --input_dir input/dataset_name \
+  --label_map_out artifacts/labels.json \
+  --overfit_one
+```
+
+If you want to isolate reconstruction loss only:
+
+```bash
+python -m interpretable_genre.train_torch_cbm \
+  --input_dir input/dataset_name \
+  --label_map_out artifacts/labels.json \
+  --overfit_one \
+  --recon_only \
+  --batch_size 1
 ```
 
 
@@ -78,9 +127,10 @@ python -m interpretable_genre.train_torch_cbm \
 
 ```bash
 python scripts/compute_centroids.py \
-  --checkpoint /path/to/checkpoint \
+  --model artifacts/ckpts/v6/step_2500_val_12.1460.pt \
+  --metadata /home/coder/xy/data/lmd_matched/metadata_genre.csv \
   --label_map artifacts/labels.json \
-  --input_dir input/dataset_name \
+  --input_dir input/A \
   --out_root artifacts/centroids 
 ```
 
@@ -88,13 +138,16 @@ python scripts/compute_centroids.py \
 
 ```bash
 python scripts/eval_accuracy.py \
-  --checkpoint /path/to/checkpoint \
+  --checkpoint artifacts/ckpts/v6/step_2500_val_12.1460.pt \
   --label_map artifacts/labels.json \
-  --input_dir input/dataset_name \
-  --track_aware \
-  --max_tracks 8 \
+  --input_dir input/A \
   --max_polyphony 8
 ```
+
+Note: evaluation expects tokenized data produced by the current tokenizer
+(channel-aware program IDs). Re-tokenize if you trained with older tokens.
+
+
 
 ## Visualize concept space (GIF)
 
@@ -102,8 +155,8 @@ After computing centroids, you can render a 3D GIF of concept vectors over check
 
 ```bash
 python scripts/plot_concept_gif.py \
-  --centroid_dirs artifacts/centroids/step_500_val_2.4368 artifacts/centroids/step_1000_val_2.3418 artifacts/centroids/step_1500_val_2.2593 \
-  --out_path artifacts/concept_scatter.gif \
+  --dirs artifacts/centroids/step_2500_val_12.1460 \
+  --out_gif artifacts/concept_scatter.gif \
   --drop_dim 3 \
   --top_genres 3
 ```
@@ -126,8 +179,6 @@ python -m interpretable_genre.infer_torch_cbm \
   --label_map artifacts/labels.json \
   --midi_path /path/to/file.mid \
   --out_dir artifacts \
-  --track_aware \
-  --max_tracks 8 \
   --max_polyphony 8 \
   --centroids_json /home/coder/xy/interpretable_genre/artifacts/centroids/step_1500_val_2.2593/centroids.json \
   --genre_shift_to jazz \
@@ -138,9 +189,9 @@ python -m interpretable_genre.infer_torch_cbm \
 ```
 
 Notes:
-- The VAE uses per-measure piano-rolls with a fixed `steps_per_measure`. Measures are inferred from time signatures and then padded/truncated.
-- Reconstruction is from concept space → latent → piano-roll → MIDI.
-- Track-aware mode pads/clips to `--max_tracks` and caps density with `--max_polyphony`.
+- Tokenization uses StreamMUSE-style event tensors: 1/16 beat steps, each step stores up to `max_polyphony` notes as `[program_id, pitch+duration]`.
+- Reconstruction is from concept space → latent → event tokens → MIDI.
+- `max_tracks` limits how many MIDI tracks are parsed into events; `max_polyphony` caps per-step note count.
 
 ## Notes
 

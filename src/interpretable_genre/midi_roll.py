@@ -13,6 +13,26 @@ class MeasureRoll:
     roll: np.ndarray  # shape: (steps, 128)
 
 
+@dataclass
+class MeasureEvents:
+    index: int
+    tokens: np.ndarray  # shape: (steps, max_polyphony, 2) => (program_id, pitch_dur_id)
+
+
+DURATION_TEMPLATES = np.array(
+    [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096],
+    dtype=np.int32,
+)
+PROGRAM_CHANNELS = 16
+PROGRAM_BASE = 128
+PROGRAM_EOS = PROGRAM_CHANNELS * PROGRAM_BASE
+PROGRAM_PAD = PROGRAM_EOS + 1
+PROGRAM_VOCAB = PROGRAM_PAD + 1
+PITCHDUR_EOS = len(DURATION_TEMPLATES) * 128
+PITCHDUR_PAD = PITCHDUR_EOS + 1
+PITCHDUR_VOCAB = PITCHDUR_PAD + 1
+
+
 def _get_time_signature(midi: mido.MidiFile) -> Tuple[int, int]:
     for track in midi.tracks:
         for msg in track:
@@ -50,6 +70,39 @@ def _collect_notes_by_track(midi: mido.MidiFile) -> List[List[Tuple[int, int, in
                 if start is not None and abs_tick > start:
                     per_track[track_idx].append((start, abs_tick, msg.note))
     return per_track
+
+
+def _collect_notes_with_programs(
+    midi: mido.MidiFile, max_tracks: int | None = None
+) -> List[Tuple[int, int, int, int]]:
+    notes: List[Tuple[int, int, int, int]] = []
+
+    def channel_for(msg: mido.Message) -> int:
+        return int(getattr(msg, "channel", 0) or 0)
+
+    for track_idx, track in enumerate(midi.tracks):
+        if max_tracks is not None and track_idx >= max_tracks:
+            break
+        abs_tick = 0
+        active: Dict[Tuple[int, int], Tuple[int, int]] = {}
+        program_by_channel: Dict[int, int] = {}
+        for msg in track:
+            abs_tick += msg.time
+            if msg.type == "program_change":
+                program_by_channel[channel_for(msg)] = int(msg.program)
+            if msg.type == "note_on" and msg.velocity > 0:
+                channel = channel_for(msg)
+                program = 127 if channel == 9 else program_by_channel.get(channel, 0)
+                program_token = channel * PROGRAM_BASE + program
+                active[(channel, msg.note)] = (abs_tick, program_token)
+            elif msg.type in ("note_off", "note_on") and msg.velocity == 0:
+                channel = channel_for(msg)
+                start_info = active.pop((channel, msg.note), None)
+                if start_info is not None:
+                    start, note_program = start_info
+                    if abs_tick > start:
+                        notes.append((start, abs_tick, msg.note, note_program))
+    return notes
 
 
 def _extract_programs(midi: mido.MidiFile) -> List[int]:
@@ -125,6 +178,154 @@ def midi_to_measure_rolls(
                 roll = np.pad(roll, ((0, pad), (0, 0)), mode="constant")
         rolls.append(MeasureRoll(index=i, roll=roll))
     return rolls, (numerator, denominator), ticks_per_beat, programs
+
+
+def _quantize_duration_steps(duration_steps: int) -> int:
+    boundaries = (DURATION_TEMPLATES[1:] + DURATION_TEMPLATES[:-1]) / 2
+    return int(np.searchsorted(boundaries, duration_steps))
+
+
+def midi_to_measure_events(
+    midi_path: str,
+    steps_per_beat: int = 4,
+    max_polyphony: int = 8,
+    max_tracks: int | None = None,
+    target_steps_per_measure: int | None = None,
+    min_aligned_ratio: float | None = None,
+    align_tolerance_steps: float = 0.25,
+) -> Tuple[List[MeasureEvents], Tuple[int, int], int]:
+    midi = mido.MidiFile(midi_path)
+    ticks_per_beat = midi.ticks_per_beat
+    numerator, denominator = _get_time_signature(midi)
+    notes = _collect_notes_with_programs(midi, max_tracks=max_tracks)
+    if not notes:
+        return [], (numerator, denominator), ticks_per_beat
+
+    ticks_per_step = max(1, int(round(ticks_per_beat / steps_per_beat)))
+    beats_per_measure = numerator * (4 / denominator)
+    steps_per_measure = max(1, int(round(steps_per_beat * beats_per_measure)))
+    duration_scale = max(1, int(round(steps_per_beat / 4)))
+
+    if min_aligned_ratio is not None:
+        aligned = 0
+        for start_tick, _, _, _ in notes:
+            step_float = start_tick / ticks_per_step
+            if abs(step_float - round(step_float)) <= align_tolerance_steps:
+                aligned += 1
+        aligned_ratio = aligned / max(1, len(notes))
+        if aligned_ratio < min_aligned_ratio:
+            return [], (numerator, denominator), ticks_per_beat
+
+    max_tick = max(end for _, end, _, _ in notes)
+    total_steps = int(np.ceil(max_tick / ticks_per_step))
+    total_measures = max(1, int(np.ceil(total_steps / steps_per_measure)))
+
+    measures = [
+        np.full((steps_per_measure, max_polyphony, 2), fill_value=[PROGRAM_PAD, PITCHDUR_PAD], dtype=np.int32)
+        for _ in range(total_measures)
+    ]
+    poly_counts = [np.zeros(steps_per_measure, dtype=np.int32) for _ in range(total_measures)]
+
+    for start_tick, end_tick, pitch, program in notes:
+        # print(program)
+        start_step = int(round(start_tick / ticks_per_step))
+        duration_steps = max(1, int(round((end_tick - start_tick) / ticks_per_step)))
+        duration_units = max(1, int(round(duration_steps / duration_scale)))
+        dur_idx = _quantize_duration_steps(duration_units)
+        pitchdur = dur_idx * 128 + int(pitch)
+        if pitchdur >= PITCHDUR_EOS:
+            pitchdur = PITCHDUR_EOS - 1
+        measure_idx = start_step // steps_per_measure
+        step_idx = start_step % steps_per_measure
+        if measure_idx >= total_measures:
+            continue
+        slot = poly_counts[measure_idx][step_idx]
+        if slot >= max_polyphony:
+            continue
+        measures[measure_idx][step_idx, slot, 0] = int(program)
+        measures[measure_idx][step_idx, slot, 1] = int(pitchdur)
+        poly_counts[measure_idx][step_idx] += 1
+
+    for m in range(total_measures):
+        for s in range(steps_per_measure):
+            count = poly_counts[m][s]
+            if count < max_polyphony:
+                measures[m][s, count, 0] = PROGRAM_EOS
+                measures[m][s, count, 1] = PITCHDUR_EOS
+
+    tokens_list = []
+    for i in range(total_measures):
+        tokens = measures[i]
+        if target_steps_per_measure is not None and target_steps_per_measure != steps_per_measure:
+            if tokens.shape[0] > target_steps_per_measure:
+                tokens = tokens[:target_steps_per_measure]
+            else:
+                pad = target_steps_per_measure - tokens.shape[0]
+                pad_block = np.full((pad, max_polyphony, 2), fill_value=[PROGRAM_PAD, PITCHDUR_PAD], dtype=np.int32)
+                tokens = np.concatenate([tokens, pad_block], axis=0)
+        tokens_list.append(MeasureEvents(index=i, tokens=tokens))
+    return tokens_list, (numerator, denominator), ticks_per_beat
+
+
+def events_to_midi(
+    measures: List[MeasureEvents],
+    time_signature: Tuple[int, int],
+    ticks_per_beat: int,
+    steps_per_beat: int = 4,
+) -> mido.MidiFile:
+    midi = mido.MidiFile(ticks_per_beat=ticks_per_beat)
+    numerator, denominator = time_signature
+    beats_per_measure = numerator * (4 / denominator)
+    steps_per_measure = measures[0].tokens.shape[0] if measures else 1
+    ticks_per_step = max(1, int(round(ticks_per_beat / steps_per_beat)))
+    duration_scale = max(1, int(round(steps_per_beat / 4)))
+
+    tracks: Dict[int, mido.MidiTrack] = {}
+    events_by_program: Dict[int, List[Tuple[int, mido.Message]]] = {}
+    for measure in measures:
+        for step_idx in range(measure.tokens.shape[0]):
+            abs_step = measure.index * steps_per_measure + step_idx
+            abs_tick = abs_step * ticks_per_step
+            for slot in range(measure.tokens.shape[1]):
+                program = int(measure.tokens[step_idx, slot, 0])
+                pitchdur = int(measure.tokens[step_idx, slot, 1])
+                if program == PROGRAM_PAD:
+                    continue
+                if program == PROGRAM_EOS:
+                    break
+                if pitchdur >= PITCHDUR_EOS:
+                    continue
+                pitch = pitchdur % 128
+                dur_idx = pitchdur // 128
+                if dur_idx < 0 or dur_idx >= len(DURATION_TEMPLATES):
+                    continue
+                duration_steps = int(DURATION_TEMPLATES[dur_idx]) * duration_scale
+                end_tick = abs_tick + duration_steps * ticks_per_step
+                channel = int(program // PROGRAM_BASE)
+                events_by_program.setdefault(program, [])
+                events_by_program[program].append(
+                    (abs_tick, mido.Message("note_on", note=int(pitch), velocity=64, channel=channel, time=0))
+                )
+                events_by_program[program].append(
+                    (end_tick, mido.Message("note_off", note=int(pitch), velocity=64, channel=channel, time=0))
+                )
+
+    for program, events in events_by_program.items():
+        track = mido.MidiTrack()
+        midi.tracks.append(track)
+        track.append(
+            mido.MetaMessage("time_signature", numerator=numerator, denominator=denominator, time=0)
+        )
+        channel = int(program // PROGRAM_BASE)
+        raw_program = int(program % PROGRAM_BASE)
+        track.append(mido.Message("program_change", program=raw_program, channel=channel, time=0))
+        events.sort(key=lambda x: x[0])
+        last_tick = 0
+        for tick, msg in events:
+            msg.time = tick - last_tick
+            track.append(msg)
+            last_tick = tick
+    return midi
 
 
 def midi_to_measure_rolls_by_track(
