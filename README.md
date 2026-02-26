@@ -62,7 +62,7 @@ The model itself.
 
 ```bash
 python -m interpretable_genre.train_torch_cbm \
-  --input_dir input/dataset_name \
+  --input_dir XMIDI_Dataset \
   --model_out artifacts/vae_cbm.pt \
   --label_map_out artifacts/labels.json \
   --track_aware \
@@ -78,9 +78,9 @@ python -m interpretable_genre.train_torch_cbm \
 
 ```bash
 python scripts/compute_centroids.py \
-  --checkpoint /path/to/checkpoint \
+  --model artifacts/vae_cbm.pt\
   --label_map artifacts/labels.json \
-  --input_dir input/dataset_name \
+  --input_dir XMIDI_Dataset \
   --out_root artifacts/centroids 
 ```
 
@@ -88,9 +88,9 @@ python scripts/compute_centroids.py \
 
 ```bash
 python scripts/eval_accuracy.py \
-  --checkpoint /path/to/checkpoint \
+  --checkpoint artifacts/vae_cbm.pt \
   --label_map artifacts/labels.json \
-  --input_dir input/dataset_name \
+  --input_dir XMIDI_Dataset \
   --track_aware \
   --max_tracks 8 \
   --max_polyphony 8
@@ -102,8 +102,8 @@ After computing centroids, you can render a 3D GIF of concept vectors over check
 
 ```bash
 python scripts/plot_concept_gif.py \
-  --centroid_dirs artifacts/centroids/step_500_val_2.4368 artifacts/centroids/step_1000_val_2.3418 artifacts/centroids/step_1500_val_2.2593 \
-  --out_path artifacts/concept_scatter.gif \
+  --dirs artifacts/centroids/vae_cbm \
+  --out_gif artifacts/concept_scatter.gif \
   --drop_dim 3 \
   --top_genres 3
 ```

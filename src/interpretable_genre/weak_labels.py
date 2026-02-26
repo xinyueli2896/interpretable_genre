@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 from typing import Dict, Iterable, List, Tuple
-
+from tqdm import tqdm
 import numpy as np
 
 from .data import load_metadata
@@ -25,7 +25,7 @@ def _dataset_stats(metadata_path: str) -> Dict[str, Tuple[float, float]]:
 def build_stats_for_paths(paths: Iterable[str]) -> Dict[str, Tuple[float, float]]:
     density_vals: List[float] = []
     entropy_vals: List[float] = []
-    for path in paths:
+    for path in tqdm(paths):
         try:
             measures, feature_names = extract_measure_features(path)
         except Exception:

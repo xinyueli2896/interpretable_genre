@@ -86,13 +86,15 @@ def main() -> None:
     )
     model.load_state_dict(ckpt["model_state"])
     model.eval()
-
     label_map = load_label_map(args.label_map)
     inv_label = {idx: label for label, idx in label_map.items()}
-
     tokenized_manifest = load_tokenized_manifest(args.tokenized_manifest)
     metadata = load_metadata_csv(args.metadata)
-
+    for k, (path, label) in enumerate(metadata):
+        parent = os.path.basename(os.path.dirname(path))
+        filename = os.path.basename(path)
+        new_path = os.path.join(parent, filename)
+        metadata[k] = (new_path, label)
     per_genre: Dict[str, List[np.ndarray]] = {}
     checkpoint_name = os.path.splitext(os.path.basename(args.model))[0]
     out_dir = os.path.join(args.out_root, checkpoint_name)
@@ -103,11 +105,14 @@ def main() -> None:
     for path, genre in tqdm(metadata, desc="Centroids"):
         if not genre:
             continue
+        '''
         try:
             roll_stack = _load_rolls(path, tokenized_manifest)
             roll_stack = _normalize_rolls(roll_stack, config)
         except Exception:
-            continue
+            continue'''
+        roll_stack = _load_rolls(path, tokenized_manifest)
+        roll_stack = _normalize_rolls(roll_stack, config)
         rolls_tensor = torch.tensor(roll_stack, dtype=torch.float32).unsqueeze(0)
         mask = torch.ones((1, roll_stack.shape[0]), dtype=torch.float32)
         with torch.no_grad():
@@ -125,7 +130,6 @@ def main() -> None:
             + "\n"
         )
     vectors_file.close()
-
     centroids = {}
     for genre, vectors in per_genre.items():
         if vectors:
@@ -142,7 +146,6 @@ def main() -> None:
             f,
             indent=2,
         )
-
 
 if __name__ == "__main__":
     main()

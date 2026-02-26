@@ -6,3 +6,4 @@ data/
 wandb/
 *.joblib
 *.log
+XMIDI_Dataset/
