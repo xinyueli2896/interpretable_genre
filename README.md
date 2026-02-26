@@ -101,6 +101,19 @@ python -m interpretable_genre.train_torch_cbm \
   --steps_per_measure 16
 ```
 
+Current working loss weights (not optimal, but usable):
+
+```bash
+python -m interpretable_genre.train_torch_cbm \
+  --input_dir input/dataset_name \
+  --label_map_out artifacts/labels.json \
+  --recon_weight 1.0 \
+  --kl_weight 0.05 \
+  --concept_weight 0.5 \
+  --class_weight 0.5 \
+  --concept_recon_weight 0.1
+```
+
 To debug reconstruction, you can overfit on a single song:
 
 ```bash
