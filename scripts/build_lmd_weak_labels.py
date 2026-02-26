@@ -6,8 +6,9 @@ import hashlib
 import json
 import os
 import random
+from multiprocessing import Pool
 import sys
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 from tqdm import tqdm
 
@@ -78,6 +79,29 @@ def _write_jsonl(path: str, items: List[Dict[str, object]]) -> None:
             f.write("\n")
 
 
+_STATS = None
+_GENRE_MAP: Dict[str, str] = {}
+_ROOT = ""
+
+
+def _init_worker(stats: Dict[str, float], genre_map: Dict[str, str], root: str) -> None:
+    global _STATS, _GENRE_MAP, _ROOT
+    _STATS = stats
+    _GENRE_MAP = genre_map
+    _ROOT = root
+
+
+def _weak_label_one(path: str) -> Optional[Dict[str, object]]:
+    try:
+        item = generate_weak_label_for_path(path, _STATS, _GENRE_MAP.get(path, ""))
+    except Exception:
+        return None
+    rel = os.path.relpath(item["path"], _ROOT)
+    item["id"] = _make_id(rel)
+    item["relpath"] = rel
+    return item
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate weak labels and split index for LMD.")
     parser.add_argument("--input_dir", help="Dataset directory containing MIDI files and metadata")
@@ -86,6 +110,7 @@ def main() -> None:
     parser.add_argument("--metadata", help="Optional CSV with path,genre for labels")
     parser.add_argument("--split", type=float, default=0.2, help="Test split fraction")
     parser.add_argument("--seed", type=int, default=13, help="Random seed")
+    parser.add_argument("--num_workers", type=int, default=0, help="Parallel workers for weak labels (0=cpu count)")
     parser.add_argument(
         "--infer_genre_from_parent",
         action="store_true",
@@ -138,19 +163,33 @@ def main() -> None:
     _write_split(os.path.join(out_dir, "train.csv"), rows, "train")
     _write_split(os.path.join(out_dir, "test.csv"), rows, "test")
 
-    stats = build_stats_for_paths(paths)
+    num_workers = args.num_workers if args.num_workers and args.num_workers > 0 else (os.cpu_count() or 1)
+    stats = build_stats_for_paths(paths, progress=True, desc="Stats", num_workers=num_workers)
     weak_labels_path = os.path.join(out_dir, "weak_labels.jsonl")
     with open(weak_labels_path, "w", encoding="utf-8") as f:
         skipped = 0
-        for path in tqdm(paths, desc="Weak labels"):
-            item = generate_weak_label_for_path(path, stats, genre_map.get(path, ""))
-            if not item["measures"]:
-                skipped += 1
-            rel = os.path.relpath(item["path"], root)
-            item["id"] = _make_id(rel)
-            item["relpath"] = rel
-            f.write(json.dumps(item))
-            f.write("\n")
+        num_workers = args.num_workers if args.num_workers and args.num_workers > 0 else (os.cpu_count() or 1)
+        if num_workers > 1:
+            with Pool(processes=num_workers, initializer=_init_worker, initargs=(stats, genre_map, root)) as pool:
+                for item in tqdm(pool.imap_unordered(_weak_label_one, paths), total=len(paths), desc="Weak labels"):
+                    if not item:
+                        skipped += 1
+                        continue
+                    if not item["measures"]:
+                        skipped += 1
+                    f.write(json.dumps(item))
+                    f.write("\n")
+        else:
+            _init_worker(stats, genre_map, root)
+            for path in tqdm(paths, desc="Weak labels"):
+                item = _weak_label_one(path)
+                if not item:
+                    skipped += 1
+                    continue
+                if not item["measures"]:
+                    skipped += 1
+                f.write(json.dumps(item))
+                f.write("\n")
         if skipped:
             sys.stderr.write(f"Skipped {skipped} files with unreadable MIDI data.\n")
 

@@ -15,34 +15,19 @@ SRC_DIR = os.path.join(REPO_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from interpretable_genre.midi_roll import midi_to_measure_rolls, midi_to_measure_rolls_by_track
+from interpretable_genre.midi_roll import PROGRAM_VOCAB, midi_to_measure_events
 from interpretable_genre.torch_data import load_metadata_csv, load_tokenized_manifest
 from interpretable_genre.torch_model import VAEConceptModel
 from interpretable_genre.utils import load_label_map, softmax
 
 
 def _normalize_rolls(rolls: np.ndarray, config: Dict[str, int]) -> np.ndarray:
-    max_tracks = config.get("max_tracks")
-    steps_per_measure = config["steps_per_measure"]
-    measures, tracks, steps, pitches = rolls.shape
-    if max_tracks is not None:
-        if tracks > max_tracks:
-            rolls = rolls[:, :max_tracks]
-        elif tracks < max_tracks:
-            pad = np.zeros((measures, max_tracks - tracks, steps, pitches), dtype=rolls.dtype)
-            rolls = np.concatenate([rolls, pad], axis=1)
-    if steps < steps_per_measure:
-        pad = np.zeros((measures, rolls.shape[1], steps_per_measure - steps, pitches), dtype=rolls.dtype)
-        rolls = np.concatenate([rolls, pad], axis=2)
-    elif steps > steps_per_measure:
-        rolls = rolls[:, :, :steps_per_measure, :]
     return rolls
 
 
 def _load_roll_stack(
     path: str,
     config: Dict[str, int],
-    track_aware: bool,
     max_tracks: int | None,
     max_polyphony: int | None,
     tokenized_manifest: Dict[str, str] | None,
@@ -50,34 +35,19 @@ def _load_roll_stack(
     try:
         if tokenized_manifest and path in tokenized_manifest:
             data = np.load(tokenized_manifest[path])
-            rolls = data["rolls"]
-            if not track_aware:
-                raise ValueError("tokenized_manifest is track-aware; pass --track_aware")
+            rolls = data["tokens"]
             return _normalize_rolls(rolls, config)
 
-        if track_aware:
-            tracks, _, _, _, _ = midi_to_measure_rolls_by_track(
-                path,
-                steps_per_beat=config["steps_per_beat"],
-                target_steps_per_measure=config["steps_per_measure"],
-                max_tracks=max_tracks,
-                max_polyphony=max_polyphony,
-            )
-            if not tracks:
-                return None
-            per_track = [np.stack([m.roll for m in track], axis=0) for track in tracks]
-            rolls = np.stack(per_track, axis=1)
-            return _normalize_rolls(rolls, config)
-
-        rolls, _, _, _ = midi_to_measure_rolls(
+        measures, _, _ = midi_to_measure_events(
             path,
             steps_per_beat=config["steps_per_beat"],
-            target_steps_per_measure=config["steps_per_measure"],
             max_polyphony=max_polyphony,
+            max_tracks=max_tracks,
+            target_steps_per_measure=config["steps_per_measure"],
         )
-        if not rolls:
+        if not measures:
             return None
-        return np.stack([m.roll for m in rolls], axis=0)
+        return np.stack([m.tokens for m in measures], axis=0)
     except Exception:
         return None
 
@@ -89,7 +59,6 @@ def main() -> None:
     parser.add_argument("--input_dir", help="Dataset directory containing test CSV and tokenized manifest")
     parser.add_argument("--test_csv", help="CSV with path,genre columns")
     parser.add_argument("--top_k", type=int, default=3, help="Top-k accuracy to report")
-    parser.add_argument("--track_aware", action="store_true", help="Use track-aware rolls")
     parser.add_argument("--max_tracks", type=int, default=None, help="Max tracks for track-aware")
     parser.add_argument("--max_polyphony", type=int, default=8, help="Max polyphony per step")
     parser.add_argument("--tokenized_manifest", help="Optional tokenized manifest JSON")
@@ -107,12 +76,21 @@ def main() -> None:
 
     ckpt = torch.load(args.checkpoint, map_location="cpu")
     config = ckpt["config"]
+    use_concept_bottleneck = config.get("use_concept_bottleneck", True)
+    enable_decoder = config.get("enable_decoder", True)
     model = VAEConceptModel(
         input_dim=config["input_dim"],
         latent_dim=config["latent_dim"],
         num_concepts=config["num_concepts"],
         num_genres=config["num_genres"],
         hidden_dim=config["hidden_dim"],
+        steps_per_measure=config["steps_per_measure"],
+        max_polyphony=config.get("max_polyphony"),
+        program_vocab=config.get("program_vocab", PROGRAM_VOCAB),
+        pitchdur_vocab=config.get("pitchdur_vocab", 3074),
+        token_embed_dim=config.get("token_embed_dim", 32),
+        use_concept_bottleneck=use_concept_bottleneck,
+        enable_decoder=enable_decoder,
     )
     model.load_state_dict(ckpt["model_state"])
     model.eval()
@@ -122,10 +100,7 @@ def main() -> None:
     metadata = load_metadata_csv(args.test_csv)
     tokenized_manifest = load_tokenized_manifest(args.tokenized_manifest) if args.tokenized_manifest else None
 
-    track_aware = args.track_aware or bool(config.get("track_aware", False))
     max_tracks = args.max_tracks or config.get("max_tracks")
-    if track_aware and max_tracks is None:
-        raise ValueError("--max_tracks is required for track-aware evaluation")
 
     total = 0
     correct_top1 = 0
@@ -139,7 +114,6 @@ def main() -> None:
         roll_stack = _load_roll_stack(
             path,
             config,
-            track_aware,
             max_tracks,
             args.max_polyphony,
             tokenized_manifest,
@@ -147,10 +121,7 @@ def main() -> None:
         if roll_stack is None:
             skipped += 1
             continue
-        if track_aware:
-            rolls_tensor = torch.tensor(roll_stack, dtype=torch.float32).unsqueeze(0)
-        else:
-            rolls_tensor = torch.tensor(roll_stack, dtype=torch.float32).unsqueeze(0)
+        rolls_tensor = torch.tensor(roll_stack, dtype=torch.long).unsqueeze(0)
         mask = torch.ones((1, roll_stack.shape[0]), dtype=torch.float32)
         with torch.no_grad():
             output = model(rolls_tensor, mask)
