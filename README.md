@@ -143,6 +143,7 @@ All ablations are exposed as flags to `train_torch_cbm.py` and can be combined.
 ```bash
 python -m interpretable_genre.train_torch_cbm \
   --input_dir XMIDI_Dataset \
+  --checkpoint_dir artifacts \
   --model_out artifacts/vae_no_cbt.pt \
   --label_map_out artifacts/labels.json \
   --no_concept_bottleneck
@@ -191,10 +192,9 @@ python scripts/compute_centroids.py \
 
 ```bash
 python scripts/eval_accuracy.py \
-  --checkpoint artifacts/vae_cbm.pt \
+  --checkpoint artifacts/latest.pt \
   --label_map artifacts/labels.json \
   --input_dir XMIDI_Dataset \
-  --track_aware \
   --max_tracks 8 \
   --max_polyphony 8
 ```

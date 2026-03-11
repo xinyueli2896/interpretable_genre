@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import List
+from tqdm import tqdm
 
 import torch
 import torch.distributed as dist
@@ -55,7 +56,7 @@ def main() -> None:
     parser.add_argument("--hidden_dim", type=int, default=128)
     parser.add_argument("--token_embed_dim", type=int, default=8)
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--steps_per_beat", type=int, default=4)
     parser.add_argument("--steps_per_measure", type=int, default=16)
@@ -315,7 +316,7 @@ def main() -> None:
         total_steps = len(loader)
         if args.ddp and isinstance(loader.sampler, DistributedSampler):
             loader.sampler.set_epoch(epoch)
-        for step_idx, batch in enumerate(loader, start=1):
+        for step_idx, batch in tqdm(enumerate(loader, start=1)):
             
             global_step += 1
             rolls = batch.rolls.to(device)

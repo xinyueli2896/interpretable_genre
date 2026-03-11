@@ -106,7 +106,7 @@ def main() -> None:
     correct_top1 = 0
     correct_topk = 0
     skipped = 0
-
+    count = 0
     for path, genre in tqdm(metadata, desc="Evaluating"):
         if genre not in label_map:
             skipped += 1
@@ -134,11 +134,13 @@ def main() -> None:
             correct_top1 += 1
         if gold in top_idx[: args.top_k]:
             correct_topk += 1
+        count += 1
+        if count >= 2000: break
 
     top1 = (correct_top1 / total) if total else 0.0
     topk = (correct_topk / total) if total else 0.0
     print(f"Total evaluated: {total}")
-    print(f"Skipped: {skipped}")
+    print(f"Skipped: {skipped}")i
     print(f"Top-1 accuracy: {top1:.4f}")
     print(f"Top-{args.top_k} accuracy: {topk:.4f}")
 
